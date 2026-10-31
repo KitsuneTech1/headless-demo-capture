@@ -5,6 +5,7 @@ CLI argument handling, and capture logic with mocked snap.exe commands.
 """
 
 import os
+import math
 import shutil
 import tempfile
 import unittest
@@ -89,6 +90,17 @@ class TestHeadlessDemoCapture(unittest.TestCase):
     with self.assertRaises(ValueError):
       hdc.parse_bmp(bytes(tampered))
 
+  def test_parse_bmp_truncated_pixels_raise(self):
+    bmp_bytes = make_test_bmp(width=3, height=2)
+    with self.assertRaisesRegex(ValueError, "truncated"):
+      hdc.parse_bmp(bmp_bytes[:-1])
+
+  def test_parse_bmp_invalid_dimensions_raise(self):
+    bmp_bytes = bytearray(make_test_bmp(width=2, height=2))
+    bmp_bytes[18:22] = (0).to_bytes(4, "little", signed=True)
+    with self.assertRaisesRegex(ValueError, "width"):
+      hdc.parse_bmp(bytes(bmp_bytes))
+
   def test_lzw_compression(self):
     indices = [hdc.quantize_pixel(255, 255, 255)] * 64
     compressed = hdc._lzw_compress(indices, min_code_size=8)
@@ -116,6 +128,18 @@ class TestHeadlessDemoCapture(unittest.TestCase):
       out_path = os.path.join(temp_dir, "empty.gif")
       with self.assertRaises(ValueError):
         hdc.write_gif([], out_path)
+
+  def test_write_gif_rejects_bad_frame(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      out_path = os.path.join(temp_dir, "bad.gif")
+      with self.assertRaisesRegex(ValueError, "pixel count"):
+        hdc.write_gif([(2, 2, [0, 1, 2])], out_path)
+
+  def test_write_gif_rejects_non_finite_fps(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      out_path = os.path.join(temp_dir, "bad.gif")
+      with self.assertRaises(ValueError):
+        hdc.write_gif([(1, 1, [0])], out_path, fps=math.inf)
 
   def test_cli_argument_parsing(self):
     args = hdc.parse_args([
@@ -152,6 +176,26 @@ class TestHeadlessDemoCapture(unittest.TestCase):
         hdc.capture_demo("Window Title", duration=-1.0)
       with self.assertRaises(ValueError):
         hdc.capture_demo("Window Title", fps=0)
+      with self.assertRaises(ValueError):
+        hdc.capture_demo("", duration=1.0)
+      with self.assertRaises(ValueError):
+        hdc.capture_demo("Window Title", duration=math.nan)
+      with self.assertRaisesRegex(ValueError, "non-empty path"):
+        hdc.capture_demo("Window Title", output="")
+
+  @patch("subprocess.run")
+  def test_capture_window_frame_reports_missing_output(self, mock_subprocess_run):
+    mock_result = MagicMock(returncode=0, stderr="")
+    mock_subprocess_run.return_value = mock_result
+    with tempfile.TemporaryDirectory() as temp_dir:
+      output_bmp = os.path.join(temp_dir, "missing.bmp")
+      with self.assertRaisesRegex(RuntimeError, "did not create"):
+        hdc.capture_window_frame("Test Window", output_bmp, snap_cmd="snap.exe")
+    mock_subprocess_run.assert_called_once_with(
+        ["snap.exe", "--window", "Test Window", "--output", output_bmp],
+        capture_output=True,
+        text=True,
+    )
 
   @patch("headless_demo_capture.time.sleep", return_value=None)
   @patch("shutil.which", return_value="C:\\tools\\snap.exe")
