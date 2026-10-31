@@ -5,6 +5,7 @@ Requires snap.exe available in system PATH.
 """
 
 import argparse
+import math
 import os
 import shutil
 import subprocess
@@ -35,6 +36,15 @@ def build_default_palette() -> bytes:
 DEFAULT_PALETTE = build_default_palette()
 
 
+def _require_positive_finite(value: float, label: str) -> None:
+  try:
+    valid = math.isfinite(value) and value > 0
+  except TypeError:
+    valid = False
+  if not valid:
+    raise ValueError(f"{label} must be a positive finite number.")
+
+
 def quantize_pixel(r: int, g: int, b: int) -> int:
   """Map 24-bit RGB values to the 6x6x6 uniform color cube index (0-215)."""
   r_i = (r * 5 + 127) // 255
@@ -49,6 +59,7 @@ def parse_bmp(data: bytes) -> Tuple[int, int, List[int]]:
     raise ValueError("Invalid BMP header")
 
   pixel_offset = int.from_bytes(data[10:14], "little")
+  dib_header_size = int.from_bytes(data[14:18], "little")
   width = int.from_bytes(data[18:22], "little", signed=True)
   height = int.from_bytes(data[22:26], "little", signed=True)
   planes = int.from_bytes(data[26:28], "little")
@@ -57,10 +68,18 @@ def parse_bmp(data: bytes) -> Tuple[int, int, List[int]]:
 
   if planes != 1:
     raise ValueError(f"Unsupported planes count: {planes}")
+  if dib_header_size < 40:
+    raise ValueError(f"Unsupported BMP header size: {dib_header_size}")
   if compression != 0:
     raise ValueError(f"Unsupported BMP compression format: {compression}")
   if bpp not in (24, 32):
     raise ValueError(f"Unsupported bit depth: {bpp} (expected 24 or 32)")
+  if width <= 0:
+    raise ValueError("BMP width must be positive")
+  if height == 0:
+    raise ValueError("BMP height must be non-zero")
+  if pixel_offset < 14 + dib_header_size or pixel_offset > len(data):
+    raise ValueError("BMP pixel data offset is outside the file")
 
   top_down = height < 0
   abs_width = abs(width)
@@ -68,6 +87,9 @@ def parse_bmp(data: bytes) -> Tuple[int, int, List[int]]:
 
   bytes_per_pixel = bpp // 8
   row_stride = (abs_width * bytes_per_pixel + 3) & ~3
+  pixel_end = pixel_offset + abs_height * row_stride
+  if pixel_end > len(data):
+    raise ValueError("BMP pixel data is truncated")
 
   indices: List[int] = []
   for row_idx in range(abs_height):
@@ -151,8 +173,21 @@ def write_gif(
   """Write a series of parsed frames to an animated GIF89a file."""
   if not frames:
     raise ValueError("Cannot write GIF without frames")
+  _require_positive_finite(fps, "FPS")
 
   width, height, _ = frames[0]
+  for frame_number, (frame_w, frame_h, indices) in enumerate(frames):
+    if not isinstance(frame_w, int) or not isinstance(frame_h, int):
+      raise ValueError(f"Frame {frame_number} dimensions must be integers")
+    if frame_w <= 0 or frame_h <= 0:
+      raise ValueError(f"Frame {frame_number} dimensions must be positive")
+    if frame_w > 65535 or frame_h > 65535:
+      raise ValueError(f"Frame {frame_number} is too large for GIF output")
+    if len(indices) != frame_w * frame_h:
+      raise ValueError(f"Frame {frame_number} has the wrong pixel count")
+    if any(not isinstance(index, int) or not 0 <= index <= 255 for index in indices):
+      raise ValueError(f"Frame {frame_number} contains an invalid color index")
+
   delay_hundredths = max(1, int(round(100.0 / max(fps, 0.1))))
 
   os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -204,15 +239,22 @@ def capture_window_frame(
     window: str, output_bmp: str, snap_cmd: str = "snap.exe"
 ) -> None:
   """Capture a single frame from the specified window without stealing focus using snap.exe."""
-  result = subprocess.run(
-      [snap_cmd, "--window", window, "--output", output_bmp],
-      capture_output=True,
-      text=True,
-  )
+  try:
+    result = subprocess.run(
+        [snap_cmd, "--window", window, "--output", output_bmp],
+        capture_output=True,
+        text=True,
+    )
+  except OSError as exc:
+    raise RuntimeError(f"Could not start capture utility '{snap_cmd}': {exc}") from exc
   if result.returncode != 0:
     error_msg = result.stderr.strip() or f"snap.exe exited with code {result.returncode}"
     raise RuntimeError(
         f"Failed to capture frame from window '{window}': {error_msg}"
+    )
+  if not os.path.isfile(output_bmp):
+    raise RuntimeError(
+        f"Capture utility '{snap_cmd}' succeeded but did not create '{output_bmp}'."
     )
 
 
@@ -234,18 +276,24 @@ def capture_demo(
       snap_cmd: Path or binary name of snap.exe tool.
 
   Returns:
-      Resolved path to the generated GIF.
+      Absolute path to the generated GIF.
   """
+  if not isinstance(window, str) or not window.strip():
+    raise ValueError("Window title must be a non-empty string.")
+  _require_positive_finite(duration, "Duration")
+  _require_positive_finite(fps, "FPS")
+  try:
+    output_path = os.fspath(output)
+  except TypeError as exc:
+    raise ValueError("Output must be a non-empty path.") from exc
+  if not isinstance(output_path, str) or not output_path.strip():
+    raise ValueError("Output must be a non-empty path.")
+
   if not shutil.which(snap_cmd):
     raise FileNotFoundError(
         f"Required capture utility '{snap_cmd}' was not found in PATH. "
         "Please install snap.exe and verify that it is accessible via PATH."
     )
-
-  if duration <= 0:
-    raise ValueError("Duration must be a positive number of seconds.")
-  if fps <= 0:
-    raise ValueError("FPS must be greater than zero.")
 
   total_frames = max(1, int(round(duration * fps)))
   frame_interval = 1.0 / fps
@@ -254,7 +302,7 @@ def capture_demo(
 
   with tempfile.TemporaryDirectory(prefix="demo_capture_") as temp_dir:
     for i in range(total_frames):
-      loop_start = time.time()
+      loop_start = time.monotonic()
       frame_file = os.path.join(temp_dir, f"frame_{i:04d}.bmp")
 
       capture_window_frame(window, frame_file, snap_cmd=snap_cmd)
@@ -265,11 +313,12 @@ def capture_demo(
       parsed_frame = parse_bmp(bmp_data)
       frames.append(parsed_frame)
 
-      elapsed = time.time() - loop_start
+      elapsed = time.monotonic() - loop_start
       remaining_sleep = frame_interval - elapsed
       if remaining_sleep > 0 and i < total_frames - 1:
         time.sleep(remaining_sleep)
 
+    output = os.path.abspath(output_path)
     write_gif(frames, output, fps=fps)
 
   return output
