@@ -1,8 +1,13 @@
 <p align="center"><a href="https://kitsunetechnologies.org/work"><img src="https://raw.githubusercontent.com/KitsuneTech1/.github/main/assets/kitsune-banner.svg" alt="Built by Kitsune Technologies" width="760"></a></p>
 
-# headless-demo-capture
+# Quiet Demo
 
-Record an animated GIF from an already open Windows window without moving focus or sending input to it.
+Record animated GIFs from Windows windows without stealing focus.
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/language-Python%203.8+-blue.svg" alt="Python 3.8+">
+</p>
 
 The Python code calls `snap.exe` once per frame, converts the returned uncompressed 24-bit or 32-bit BMP images, and writes a GIF89a file. The target window must already exist. Window matching and support for inactive or minimized windows come from `snap.exe` and Windows.
 
@@ -20,22 +25,29 @@ Live capture requires an existing matching window in an interactive Windows desk
 
 ## Install
 
-Copy the repository files into a directory. No pip install step is required.
+Clone or download this repository. No pip install required; the code uses only the Python standard library.
 
-## Command line
+Before recording, install snap.exe and confirm it is on PATH. The project does not ship snap.exe.
 
-Open the window you want to record, then run:
+## Quick Start
 
-```text
-python headless_demo_capture.py --window "Calculator" --duration 5 --output docs/demo.gif --fps 10
-```
+1. Install snap.exe and verify it is on PATH:
+   ```
+   where.exe snap.exe
+   ```
 
-Options:
+2. Open the window you want to record, then run:
+   ```
+   python headless_demo_capture.py --window "Window Title" --duration 5 --fps 10
+   ```
 
-- `--window`: Window title passed to `snap.exe`. Required.
-- `--duration`: Recording duration in seconds. Default: `5.0`.
-- `--output`: GIF path. Default: `docs/demo.gif`.
-- `--fps`: Capture rate. Default: `10.0`.
+   Replace "Window Title" with the exact title of the window to capture. The GIF saves to `docs/demo.gif` by default.
+
+3. Supported options:
+   - `--window`: Window title passed to snap.exe. Required.
+   - `--duration`: Recording duration in seconds. Default: `5.0`.
+   - `--output`: Output GIF path. Default: `docs/demo.gif`.
+   - `--fps`: Frame rate. Default: `10.0`.
 
 Capture requests are limited to 100,000 frames. Each `snap.exe` frame request has a 60-second timeout.
 
@@ -66,13 +78,11 @@ The capture loop is timed with a monotonic clock, so frame spacing is best effor
 
 ## Example
 
-`demo.py` shows a small API call using a window titled `Notepad`:
+`demo.py` shows a small API call. Edit the `target_window` variable to match the title of a window you have open, then run:
 
-```text
+```
 python demo.py
 ```
-
-Change the title before running it if the target window has a different title.
 
 ## Tests
 
