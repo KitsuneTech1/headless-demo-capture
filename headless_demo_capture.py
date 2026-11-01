@@ -16,6 +16,8 @@ from typing import List, Sequence, Tuple
 
 
 __version__ = "0.1.0"
+MAX_CAPTURE_FRAMES = 100_000
+CAPTURE_TIMEOUT_SECONDS = 60.0
 
 
 def build_default_palette() -> bytes:
@@ -43,6 +45,27 @@ def _require_positive_finite(value: float, label: str) -> None:
     valid = False
   if not valid:
     raise ValueError(f"{label} must be a positive finite number.")
+
+
+def _coerce_non_empty_path(value, label: str) -> str:
+  try:
+    path = os.fspath(value)
+  except TypeError as exc:
+    raise ValueError(f"{label} must be a non-empty path.") from exc
+  if not isinstance(path, str) or not path.strip():
+    raise ValueError(f"{label} must be a non-empty path.")
+  return path
+
+
+def _calculate_total_frames(duration: float, fps: float) -> int:
+  requested_frames = duration * fps
+  if not math.isfinite(requested_frames):
+    raise ValueError("Duration and FPS request a non-finite number of frames.")
+  if requested_frames > MAX_CAPTURE_FRAMES:
+    raise ValueError(
+        f"Duration and FPS may not request more than {MAX_CAPTURE_FRAMES} frames."
+    )
+  return max(1, int(round(requested_frames)))
 
 
 def quantize_pixel(r: int, g: int, b: int) -> int:
@@ -142,7 +165,9 @@ def _lzw_compress(indices: Sequence[int], min_code_size: int = 8) -> bytes:
       if next_code < 4096:
         code_table[combined] = next_code
         next_code += 1
-        if next_code == (1 << code_size) and code_size < 12:
+        # The GIF decoder creates this entry after consuming the next code,
+        # so the encoder must keep using the old width for one more entry.
+        if next_code == (1 << code_size) + 1 and code_size < 12:
           code_size += 1
       else:
         write_code(clear_code, code_size)
@@ -239,14 +264,23 @@ def capture_window_frame(
     window: str, output_bmp: str, snap_cmd: str = "snap.exe"
 ) -> None:
   """Capture a single frame from the specified window without stealing focus using snap.exe."""
+  snap_command = _coerce_non_empty_path(snap_cmd, "Capture utility")
   try:
     result = subprocess.run(
-        [snap_cmd, "--window", window, "--output", output_bmp],
+        [snap_command, "--window", window, "--output", output_bmp],
         capture_output=True,
         text=True,
+        timeout=CAPTURE_TIMEOUT_SECONDS,
     )
+  except subprocess.TimeoutExpired as exc:
+    raise RuntimeError(
+        f"Capture utility '{snap_command}' timed out after "
+        f"{CAPTURE_TIMEOUT_SECONDS:g} seconds."
+    ) from exc
   except OSError as exc:
-    raise RuntimeError(f"Could not start capture utility '{snap_cmd}': {exc}") from exc
+    raise RuntimeError(
+        f"Could not start capture utility '{snap_command}': {exc}"
+    ) from exc
   if result.returncode != 0:
     error_msg = result.stderr.strip() or f"snap.exe exited with code {result.returncode}"
     raise RuntimeError(
@@ -254,7 +288,7 @@ def capture_window_frame(
     )
   if not os.path.isfile(output_bmp):
     raise RuntimeError(
-        f"Capture utility '{snap_cmd}' succeeded but did not create '{output_bmp}'."
+        f"Capture utility '{snap_command}' succeeded but did not create '{output_bmp}'."
     )
 
 
@@ -282,20 +316,16 @@ def capture_demo(
     raise ValueError("Window title must be a non-empty string.")
   _require_positive_finite(duration, "Duration")
   _require_positive_finite(fps, "FPS")
-  try:
-    output_path = os.fspath(output)
-  except TypeError as exc:
-    raise ValueError("Output must be a non-empty path.") from exc
-  if not isinstance(output_path, str) or not output_path.strip():
-    raise ValueError("Output must be a non-empty path.")
+  output_path = _coerce_non_empty_path(output, "Output")
+  snap_command = _coerce_non_empty_path(snap_cmd, "Capture utility")
 
-  if not shutil.which(snap_cmd):
+  if not shutil.which(snap_command):
     raise FileNotFoundError(
-        f"Required capture utility '{snap_cmd}' was not found in PATH. "
+        f"Required capture utility '{snap_command}' was not found in PATH. "
         "Please install snap.exe and verify that it is accessible via PATH."
     )
 
-  total_frames = max(1, int(round(duration * fps)))
+  total_frames = _calculate_total_frames(duration, fps)
   frame_interval = 1.0 / fps
 
   frames: List[Tuple[int, int, List[int]]] = []
@@ -306,7 +336,7 @@ def capture_demo(
       loop_start = time.monotonic()
       frame_file = os.path.join(temp_dir, f"frame_{i:04d}.bmp")
 
-      capture_window_frame(window, frame_file, snap_cmd=snap_cmd)
+      capture_window_frame(window, frame_file, snap_cmd=snap_command)
 
       with open(frame_file, "rb") as f:
         bmp_data = f.read()
