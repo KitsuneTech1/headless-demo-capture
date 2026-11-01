@@ -8,6 +8,7 @@ import io
 import math
 import os
 import shutil
+import subprocess
 import sys
 import unittest
 from contextlib import contextmanager
@@ -78,6 +79,117 @@ def make_test_bmp(
   return bytes(header)
 
 
+def decode_gif_frames(data):
+  """Decode the simple GIF subset emitted by the module without using its code."""
+  if data[:6] not in (b"GIF87a", b"GIF89a"):
+    raise AssertionError("invalid GIF signature")
+
+  width = int.from_bytes(data[6:8], "little")
+  height = int.from_bytes(data[8:10], "little")
+  packed = data[10]
+  pos = 13
+  if packed & 0x80:
+    pos += 3 * (2 ** ((packed & 0x07) + 1))
+
+  def read_sub_blocks():
+    nonlocal pos
+    chunks = []
+    while True:
+      size = data[pos]
+      pos += 1
+      if size == 0:
+        return b"".join(chunks)
+      chunks.append(data[pos : pos + size])
+      pos += size
+
+  def decode_lzw(payload, minimum_code_size):
+    clear_code = 1 << minimum_code_size
+    end_code = clear_code + 1
+    bit_buffer = 0
+    bit_count = 0
+    bit_index = 0
+    code_size = minimum_code_size + 1
+    table = {i: bytes([i]) for i in range(clear_code)}
+    next_code = end_code + 1
+    previous = None
+    decoded = bytearray()
+
+    def read_code():
+      nonlocal bit_buffer, bit_count, bit_index
+      while bit_count < code_size:
+        if bit_index >= len(payload):
+          raise AssertionError("truncated GIF LZW stream")
+        bit_buffer |= payload[bit_index] << bit_count
+        bit_count += 8
+        bit_index += 1
+      code = bit_buffer & ((1 << code_size) - 1)
+      bit_buffer >>= code_size
+      bit_count -= code_size
+      return code
+
+    while True:
+      code = read_code()
+      if code == clear_code:
+        table = {i: bytes([i]) for i in range(clear_code)}
+        code_size = minimum_code_size + 1
+        next_code = end_code + 1
+        previous = None
+        continue
+      if code == end_code:
+        return list(decoded)
+      if code in table:
+        entry = table[code]
+      elif code == next_code and previous is not None:
+        entry = previous + previous[:1]
+      else:
+        raise AssertionError("invalid GIF LZW code")
+      decoded.extend(entry)
+      if previous is not None:
+        table[next_code] = previous + entry[:1]
+        next_code += 1
+        if next_code == (1 << code_size) and code_size < 12:
+          code_size += 1
+      previous = entry
+
+  frames = []
+  while True:
+    marker = data[pos]
+    pos += 1
+    if marker == 0x3B:
+      return width, height, frames
+    if marker == 0x21:
+      extension_label = data[pos]
+      pos += 1
+      if extension_label == 0xF9:
+        block_size = data[pos]
+        pos += 1 + block_size
+        if data[pos] != 0:
+          raise AssertionError("malformed GIF graphic control extension")
+        pos += 1
+      else:
+        read_sub_blocks()
+      continue
+    if marker != 0x2C:
+      raise AssertionError("unexpected GIF block")
+
+    frame_width = int.from_bytes(data[pos + 4 : pos + 6], "little")
+    frame_height = int.from_bytes(data[pos + 6 : pos + 8], "little")
+    image_packed = data[pos + 8]
+    pos += 9
+    if image_packed & 0x80:
+      pos += 3 * (2 ** ((image_packed & 0x07) + 1))
+    minimum_code_size = data[pos]
+    pos += 1
+    compressed = read_sub_blocks()
+    frames.append(
+        (
+            frame_width,
+            frame_height,
+            decode_lzw(compressed, minimum_code_size),
+        )
+    )
+
+
 class TestHeadlessDemoCapture(unittest.TestCase):
 
   def test_parse_bmp_valid_24bit(self):
@@ -128,6 +240,31 @@ class TestHeadlessDemoCapture(unittest.TestCase):
     self.assertTrue(len(compressed) > 0)
     self.assertEqual(compressed[0], 8)  # Minimum code size header
     self.assertEqual(compressed[-1], 0)  # Block terminator
+
+  def test_write_gif_handles_lzw_code_size_growth(self):
+    indices = [(i * 73 + 19) % 256 for i in range(300)]
+    with fixed_temp_dir("write-lzw-boundary") as temp_dir:
+      out_path = os.path.join(temp_dir, "boundary.gif")
+      hdc.write_gif([(300, 1, indices)], out_path)
+
+      with open(out_path, "rb") as f:
+        data = f.read()
+      width, height, frames = decode_gif_frames(data)
+      self.assertEqual((width, height), (300, 1))
+      self.assertEqual(frames, [(300, 1, indices)])
+
+  def test_write_gif_can_be_decoded(self):
+    frame1 = (2, 2, [0, 1, 2, 3])
+    frame2 = (2, 2, [3, 2, 1, 0])
+    with fixed_temp_dir("write-decode") as temp_dir:
+      out_path = os.path.join(temp_dir, "decoded.gif")
+      hdc.write_gif([frame1, frame2], out_path, fps=5.0)
+
+      with open(out_path, "rb") as f:
+        data = f.read()
+      width, height, frames = decode_gif_frames(data)
+      self.assertEqual((width, height), (2, 2))
+      self.assertEqual(frames, [frame1, frame2])
 
   def test_write_gif_creates_valid_structure(self):
     frame1 = (2, 2, [0, 1, 2, 3])
@@ -209,6 +346,14 @@ class TestHeadlessDemoCapture(unittest.TestCase):
         hdc.capture_demo("Window Title", duration=math.nan)
       with self.assertRaisesRegex(ValueError, "non-empty path"):
         hdc.capture_demo("Window Title", output="")
+      with self.assertRaisesRegex(ValueError, "non-finite number of frames"):
+        hdc.capture_demo("Window Title", duration=1e308, fps=1e308)
+      with self.assertRaisesRegex(ValueError, "more than"):
+        hdc.capture_demo(
+            "Window Title", duration=hdc.MAX_CAPTURE_FRAMES + 1, fps=1.0
+        )
+      with self.assertRaisesRegex(ValueError, "Capture utility"):
+        hdc.capture_demo("Window Title", snap_cmd=None)
 
   @patch("shutil.which", return_value="C:\\tools\\snap.exe")
   @patch("headless_demo_capture.capture_window_frame", side_effect=RuntimeError("capture failed"))
@@ -228,6 +373,7 @@ class TestHeadlessDemoCapture(unittest.TestCase):
         ["snap.exe", "--window", "Test Window", "--output", output_bmp],
         capture_output=True,
         text=True,
+        timeout=hdc.CAPTURE_TIMEOUT_SECONDS,
     )
 
   @patch("subprocess.run")
@@ -238,6 +384,13 @@ class TestHeadlessDemoCapture(unittest.TestCase):
     with fixed_temp_dir("capture-failure") as temp_dir:
       output_bmp = os.path.join(temp_dir, "failed.bmp")
       with self.assertRaisesRegex(RuntimeError, "window not found"):
+        hdc.capture_window_frame("Test Window", output_bmp, snap_cmd="snap.exe")
+
+  @patch("subprocess.run", side_effect=subprocess.TimeoutExpired("snap.exe", 60))
+  def test_capture_window_frame_reports_timeout(self, mock_subprocess_run):
+    with fixed_temp_dir("capture-timeout") as temp_dir:
+      output_bmp = os.path.join(temp_dir, "timeout.bmp")
+      with self.assertRaisesRegex(RuntimeError, "timed out"):
         hdc.capture_window_frame("Test Window", output_bmp, snap_cmd="snap.exe")
 
   def test_main_reports_capture_error(self):
@@ -261,7 +414,7 @@ class TestHeadlessDemoCapture(unittest.TestCase):
   ):
     test_bmp = make_test_bmp(width=4, height=4, color=(128, 64, 32))
 
-    def side_effect(cmd, capture_output=True, text=True):
+    def side_effect(cmd, capture_output=True, text=True, timeout=None):
       output_idx = cmd.index("--output") + 1
       bmp_target = cmd[output_idx]
       with open(bmp_target, "wb") as f:

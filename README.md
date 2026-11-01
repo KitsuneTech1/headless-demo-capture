@@ -35,6 +35,8 @@ Options:
 - `--output`: GIF path. Default: `docs/demo.gif`.
 - `--fps`: Capture rate. Default: `10.0`.
 
+Capture requests are limited to 100,000 frames. Each `snap.exe` frame request has a 60-second timeout.
+
 The output directory is created when needed. The command exits with an error if `snap.exe` is missing, a frame cannot be captured, a frame is not a supported BMP, or the inputs are invalid.
 
 ## Python API
