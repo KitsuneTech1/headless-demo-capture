@@ -4,14 +4,35 @@ Tests verify BMP parsing, GIF LZW compression, output file construction,
 CLI argument handling, and capture logic with mocked snap.exe commands.
 """
 
-import os
+import io
 import math
+import os
 import shutil
-import tempfile
+import sys
 import unittest
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import headless_demo_capture as hdc
+
+
+TEST_TEMP_ROOT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    ".test-tmp-safe",
+)
+
+
+@contextmanager
+def fixed_temp_dir(name):
+  """Use stable repo-local paths for runners that restrict random temp dirs."""
+  path = os.path.join(TEST_TEMP_ROOT, name)
+  os.makedirs(path, exist_ok=True)
+  try:
+    yield path
+  finally:
+    shutil.rmtree(path, ignore_errors=False)
+    if os.path.isdir(TEST_TEMP_ROOT) and not os.listdir(TEST_TEMP_ROOT):
+      os.rmdir(TEST_TEMP_ROOT)
 
 
 def make_test_bmp(
@@ -111,7 +132,7 @@ class TestHeadlessDemoCapture(unittest.TestCase):
   def test_write_gif_creates_valid_structure(self):
     frame1 = (2, 2, [0, 1, 2, 3])
     frame2 = (2, 2, [3, 2, 1, 0])
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with fixed_temp_dir("write-valid") as temp_dir:
       out_path = os.path.join(temp_dir, "test.gif")
       hdc.write_gif([frame1, frame2], out_path, fps=5.0)
 
@@ -124,19 +145,25 @@ class TestHeadlessDemoCapture(unittest.TestCase):
       self.assertTrue(data.endswith(b"\x3B"))
 
   def test_write_gif_empty_frames_raises(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with fixed_temp_dir("write-empty") as temp_dir:
       out_path = os.path.join(temp_dir, "empty.gif")
       with self.assertRaises(ValueError):
         hdc.write_gif([], out_path)
 
+  def test_write_gif_creates_missing_output_directory(self):
+    with fixed_temp_dir("write-parent") as temp_dir:
+      out_path = os.path.join(temp_dir, "nested", "demo.gif")
+      hdc.write_gif([(1, 1, [0])], out_path)
+      self.assertTrue(os.path.isfile(out_path))
+
   def test_write_gif_rejects_bad_frame(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with fixed_temp_dir("write-bad-frame") as temp_dir:
       out_path = os.path.join(temp_dir, "bad.gif")
       with self.assertRaisesRegex(ValueError, "pixel count"):
         hdc.write_gif([(2, 2, [0, 1, 2])], out_path)
 
   def test_write_gif_rejects_non_finite_fps(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with fixed_temp_dir("write-bad-fps") as temp_dir:
       out_path = os.path.join(temp_dir, "bad.gif")
       with self.assertRaises(ValueError):
         hdc.write_gif([(1, 1, [0])], out_path, fps=math.inf)
@@ -187,7 +214,7 @@ class TestHeadlessDemoCapture(unittest.TestCase):
   def test_capture_window_frame_reports_missing_output(self, mock_subprocess_run):
     mock_result = MagicMock(returncode=0, stderr="")
     mock_subprocess_run.return_value = mock_result
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with fixed_temp_dir("capture-missing") as temp_dir:
       output_bmp = os.path.join(temp_dir, "missing.bmp")
       with self.assertRaisesRegex(RuntimeError, "did not create"):
         hdc.capture_window_frame("Test Window", output_bmp, snap_cmd="snap.exe")
@@ -196,6 +223,29 @@ class TestHeadlessDemoCapture(unittest.TestCase):
         capture_output=True,
         text=True,
     )
+
+  @patch("subprocess.run")
+  def test_capture_window_frame_reports_command_failure(self, mock_subprocess_run):
+    mock_subprocess_run.return_value = MagicMock(
+        returncode=2, stderr="window not found"
+    )
+    with fixed_temp_dir("capture-failure") as temp_dir:
+      output_bmp = os.path.join(temp_dir, "failed.bmp")
+      with self.assertRaisesRegex(RuntimeError, "window not found"):
+        hdc.capture_window_frame("Test Window", output_bmp, snap_cmd="snap.exe")
+
+  def test_main_reports_capture_error(self):
+    stderr = io.StringIO()
+    with patch.object(sys, "argv", ["headless_demo_capture.py", "--window", "Test"]):
+      with patch.object(
+          hdc, "capture_demo", side_effect=RuntimeError("capture failed")
+      ):
+        with patch.object(sys, "stderr", stderr):
+          with self.assertRaises(SystemExit) as exit_info:
+            hdc.main()
+
+    self.assertEqual(exit_info.exception.code, 1)
+    self.assertIn("Error: capture failed", stderr.getvalue())
 
   @patch("headless_demo_capture.time.sleep", return_value=None)
   @patch("shutil.which", return_value="C:\\tools\\snap.exe")
@@ -217,14 +267,19 @@ class TestHeadlessDemoCapture(unittest.TestCase):
 
     mock_subprocess_run.side_effect = side_effect
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with fixed_temp_dir("capture-output") as temp_dir:
       out_gif = os.path.join(temp_dir, "demo_result.gif")
-      res = hdc.capture_demo(
-          window="Test Window",
-          duration=0.2,
-          output=out_gif,
-          fps=5.0,
-      )
+      with patch.object(
+          hdc.tempfile,
+          "TemporaryDirectory",
+          return_value=fixed_temp_dir("capture-work"),
+      ):
+        res = hdc.capture_demo(
+            window="Test Window",
+            duration=0.2,
+            output=out_gif,
+            fps=5.0,
+        )
       self.assertEqual(res, out_gif)
       self.assertTrue(os.path.exists(out_gif))
       with open(out_gif, "rb") as f:

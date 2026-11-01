@@ -19,5 +19,6 @@ env/
 
 # Output directories and capture temp files
 docs/demo.gif
+.test-tmp-safe/
 *.tmp
 *.bmp
