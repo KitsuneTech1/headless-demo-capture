@@ -30,7 +30,7 @@ def fixed_temp_dir(name):
   try:
     yield path
   finally:
-    shutil.rmtree(path, ignore_errors=False)
+    shutil.rmtree(path, ignore_errors=True)
     if os.path.isdir(TEST_TEMP_ROOT) and not os.listdir(TEST_TEMP_ROOT):
       os.rmdir(TEST_TEMP_ROOT)
 
@@ -210,6 +210,12 @@ class TestHeadlessDemoCapture(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "non-empty path"):
         hdc.capture_demo("Window Title", output="")
 
+  @patch("shutil.which", return_value="C:\\tools\\snap.exe")
+  @patch("headless_demo_capture.capture_window_frame", side_effect=RuntimeError("capture failed"))
+  def test_capture_demo_preserves_capture_error(self, mock_capture, mock_which):
+    with self.assertRaisesRegex(RuntimeError, "capture failed"):
+      hdc.capture_demo("Window Title", duration=1.0, fps=1.0)
+
   @patch("subprocess.run")
   def test_capture_window_frame_reports_missing_output(self, mock_subprocess_run):
     mock_result = MagicMock(returncode=0, stderr="")
@@ -269,17 +275,14 @@ class TestHeadlessDemoCapture(unittest.TestCase):
 
     with fixed_temp_dir("capture-output") as temp_dir:
       out_gif = os.path.join(temp_dir, "demo_result.gif")
-      with patch.object(
-          hdc.tempfile,
-          "TemporaryDirectory",
-          return_value=fixed_temp_dir("capture-work"),
-      ):
-        res = hdc.capture_demo(
-            window="Test Window",
-            duration=0.2,
-            output=out_gif,
-            fps=5.0,
-        )
+      with fixed_temp_dir("capture-work") as capture_dir:
+        with patch.object(hdc.tempfile, "mkdtemp", return_value=capture_dir):
+          res = hdc.capture_demo(
+              window="Test Window",
+              duration=0.2,
+              output=out_gif,
+              fps=5.0,
+          )
       self.assertEqual(res, out_gif)
       self.assertTrue(os.path.exists(out_gif))
       with open(out_gif, "rb") as f:

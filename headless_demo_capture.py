@@ -300,7 +300,8 @@ def capture_demo(
 
   frames: List[Tuple[int, int, List[int]]] = []
 
-  with tempfile.TemporaryDirectory(prefix="demo_capture_") as temp_dir:
+  temp_dir = tempfile.mkdtemp(prefix="demo_capture_")
+  try:
     for i in range(total_frames):
       loop_start = time.monotonic()
       frame_file = os.path.join(temp_dir, f"frame_{i:04d}.bmp")
@@ -320,6 +321,9 @@ def capture_demo(
 
     output = os.path.abspath(output_path)
     write_gif(frames, output, fps=fps)
+  finally:
+    # Do not replace a useful capture or parsing error with a cleanup error.
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
   return output
 
