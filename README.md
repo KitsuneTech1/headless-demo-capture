@@ -10,9 +10,11 @@ The Python code calls `snap.exe` once per frame, converts the returned uncompres
 - Python 3.8 or newer
 - `snap.exe` from the published snap project, available on `PATH`
 
-This repository does not ship or build `snap.exe`. Install the executable separately and check it with `where snap.exe` before recording.
+This repository does not ship or build `snap.exe`. Install the executable separately and check it with `where.exe snap.exe` before recording. In PowerShell, include the `.exe` suffix because `where` is also a PowerShell alias.
 
 The project uses only the Python standard library. It does not open a GUI, activate the target window, or send mouse and keyboard input.
+
+Live capture requires an existing matching window in an interactive Windows desktop session. The test command below is the offline verification path.
 
 ## Install
 
