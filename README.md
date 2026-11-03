@@ -2,6 +2,8 @@
 
 # Quiet Demo
 
+[![Build Status](https://github.com/KitsuneTech1/headless-demo-capture/actions/workflows/ci.yml/badge.svg)](https://github.com/KitsuneTech1/headless-demo-capture/actions)
+
 Record animated GIFs from Windows windows without stealing focus.
 
 <p align="center">
@@ -22,6 +24,17 @@ This repository does not ship or build `snap.exe`. Install the executable separa
 The project uses only the Python standard library. It does not open a GUI, activate the target window, or send mouse and keyboard input.
 
 Live capture requires an existing matching window in an interactive Windows desktop session. The test command below is the offline verification path.
+
+
+## Architecture & Data Flow
+
+```mermaid
+flowchart LR
+    A[CLI Command: Target Window HWND/Title] --> B[Window Capture Engine: GDI PrintWindow]
+    B --> C[Frame Sequencer: FPS & Frame Delta Filtering]
+    C --> D[Pillow Frame Quantizer: NeuQuant Palette]
+    D --> E[Export Optimized Animated GIF Demo]
+```
 
 ## Install
 
